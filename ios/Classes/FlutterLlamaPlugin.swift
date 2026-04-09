@@ -32,10 +32,17 @@ public class FlutterLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         let instance = FlutterLlamaPlugin()
         registrar.addMethodCallDelegate(instance, channel: channel)
         eventChannel.setStreamHandler(instance)
-        
-        NSLog("[FlutterLlama] Plugin registered")
+
+        // Multimodal channel
+        let mmChannel = FlutterMethodChannel(
+            name: "flutter_llama_multimodal",
+            binaryMessenger: registrar.messenger()
+        )
+        mmChannel.setMethodCallHandler(instance.handleMultimodal)
+
+        NSLog("[FlutterLlama] Plugin registered (text + multimodal)")
     }
-    
+
     public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
         switch call.method {
         case "loadModel":
@@ -52,6 +59,139 @@ public class FlutterLlamaPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             stopGeneration(result: result)
         default:
             result(FlutterMethodNotImplemented)
+        }
+    }
+
+    // MARK: - Multimodal MethodChannel Handler
+
+    private var multimodalLoaded = false
+
+    func handleMultimodal(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+        switch call.method {
+        case "loadMultimodalModel":
+            loadMultimodalModel(call: call, result: result)
+        case "generateMultimodal":
+            generateMultimodal(call: call, result: result)
+        case "unloadMultimodalModel":
+            unloadMultimodalModel(result: result)
+        case "getMultimodalModelInfo":
+            getMultimodalModelInfo(result: result)
+        default:
+            result(FlutterMethodNotImplemented)
+        }
+    }
+
+    private func loadMultimodalModel(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        queue.async { [weak self] in
+            guard let self = self else {
+                DispatchQueue.main.async { result(false) }
+                return
+            }
+            guard self.modelLoaded else {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "MODEL_NOT_LOADED", message: "Load text model first", details: nil))
+                }
+                return
+            }
+            guard let args = call.arguments as? [String: Any],
+                  let mmprojPath = args["mmprojPath"] as? String else {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "INVALID_ARGS", message: "Missing mmprojPath", details: nil))
+                }
+                return
+            }
+
+            let success = mmprojPath.withCString { cPath in
+                llama_init_multimodal(cPath)
+            }
+
+            self.multimodalLoaded = success
+            DispatchQueue.main.async {
+                if success {
+                    NSLog("[FlutterLlama] Multimodal loaded")
+                    result(true)
+                } else {
+                    result(FlutterError(code: "MMPROJ_FAILED", message: "Failed to load mmproj", details: nil))
+                }
+            }
+        }
+    }
+
+    private func generateMultimodal(call: FlutterMethodCall, result: @escaping FlutterResult) {
+        queue.async { [weak self] in
+            guard let self = self, self.modelLoaded, self.multimodalLoaded else {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "NOT_READY", message: "Model or multimodal not loaded", details: nil))
+                }
+                return
+            }
+            guard let args = call.arguments as? [String: Any],
+                  let prompt = args["prompt"] as? String,
+                  let imageData = args["imageData"] as? FlutterStandardTypedData else {
+                DispatchQueue.main.async {
+                    result(FlutterError(code: "INVALID_ARGS", message: "Missing prompt or imageData", details: nil))
+                }
+                return
+            }
+
+            let temperature = Float(args["temperature"] as? Double ?? 0.0)
+            let maxTokens = Int32(args["maxTokens"] as? Int ?? 512)
+            let startTime = Date()
+
+            var outputBuffer = [CChar](repeating: 0, count: 16384)
+            var tokensGenerated: Int32 = 0
+
+            let bytes = imageData.data
+            let success = bytes.withUnsafeBytes { rawPtr -> Bool in
+                guard let imagePtr = rawPtr.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return false }
+                return prompt.withCString { cPrompt in
+                    llama_generate_with_image(
+                        cPrompt,
+                        imagePtr,
+                        Int32(bytes.count),
+                        temperature,
+                        maxTokens,
+                        &outputBuffer,
+                        Int32(outputBuffer.count),
+                        &tokensGenerated
+                    )
+                }
+            }
+
+            let generationTime = Int(Date().timeIntervalSince(startTime) * 1000)
+
+            DispatchQueue.main.async {
+                if success {
+                    let text = String(cString: outputBuffer)
+                    let response: [String: Any] = [
+                        "text": text,
+                        "tokensGenerated": tokensGenerated,
+                        "generationTimeMs": generationTime,
+                    ]
+                    result(response)
+                } else {
+                    result(FlutterError(code: "GENERATE_FAILED", message: "Vision generation failed", details: nil))
+                }
+            }
+        }
+    }
+
+    private func unloadMultimodalModel(result: @escaping FlutterResult) {
+        queue.async { [weak self] in
+            llama_free_multimodal()
+            self?.multimodalLoaded = false
+            DispatchQueue.main.async { result(nil) }
+        }
+    }
+
+    private func getMultimodalModelInfo(result: @escaping FlutterResult) {
+        queue.async {
+            let supportsVision = llama_multimodal_supports_vision()
+            let info: [String: Any] = [
+                "supportsVision": supportsVision,
+                "loaded": self.multimodalLoaded,
+            ]
+            DispatchQueue.main.async { result(info) }
         }
     }
     
@@ -396,3 +536,25 @@ func llama_cpp_bridge_free_model()
 
 @_silgen_name("llama_stop_generation")
 func llama_stop_generation()
+
+// Multimodal (Vision) bridge functions
+@_silgen_name("llama_init_multimodal")
+func llama_init_multimodal(_ mmprojPath: UnsafePointer<CChar>) -> Bool
+
+@_silgen_name("llama_generate_with_image")
+func llama_generate_with_image(
+    _ prompt: UnsafePointer<CChar>,
+    _ imageData: UnsafePointer<UInt8>,
+    _ imageLen: Int32,
+    _ temperature: Float,
+    _ maxTokens: Int32,
+    _ output: UnsafeMutablePointer<CChar>,
+    _ outputSize: Int32,
+    _ tokensGenerated: UnsafeMutablePointer<Int32>
+) -> Bool
+
+@_silgen_name("llama_free_multimodal")
+func llama_free_multimodal()
+
+@_silgen_name("llama_multimodal_supports_vision")
+func llama_multimodal_supports_vision() -> Bool

@@ -21,8 +21,8 @@ Supports GPU acceleration via Metal and CPU optimization via Accelerate framewor
   # Pre-built static libraries (embedded llama.cpp)
   s.vendored_libraries = 'ios_libs/*.a'
   
-  # Preserve llama.cpp headers
-  s.preserve_paths = '../llama.cpp/include/**/*', '../llama.cpp/ggml/include/**/*'
+  # Preserve llama.cpp headers (including mtmd for multimodal)
+  s.preserve_paths = '../llama.cpp/include/**/*', '../llama.cpp/ggml/include/**/*', '../llama.cpp/tools/mtmd/**/*'
   
   # C++ settings
   s.library = 'c++'
@@ -35,8 +35,8 @@ Supports GPU acceleration via Metal and CPU optimization via Accelerate framewor
     'GCC_ENABLE_CPP_RTTI' => 'YES',
     'CLANG_WARN_DOCUMENTATION_COMMENTS' => 'NO',
     'GCC_WARN_INHIBIT_ALL_WARNINGS' => 'YES',
-    'HEADER_SEARCH_PATHS' => '"${PODS_TARGET_SRCROOT}/../llama.cpp/include" "${PODS_TARGET_SRCROOT}/../llama.cpp/ggml/include"',
-    'OTHER_LDFLAGS' => '$(inherited) -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libllama.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-base.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-cpu.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-metal.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-blas.a"'
+    'HEADER_SEARCH_PATHS' => '"${PODS_TARGET_SRCROOT}/../llama.cpp/include" "${PODS_TARGET_SRCROOT}/../llama.cpp/ggml/include" "${PODS_TARGET_SRCROOT}/../llama.cpp/tools/mtmd"',
+    'OTHER_LDFLAGS' => '$(inherited) -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libllama.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-base.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-cpu.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-metal.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libggml-blas.a" -force_load "${PODS_TARGET_SRCROOT}/ios_libs/libmtmd.a"'
   }
   
   # Frameworks for GPU acceleration and optimization

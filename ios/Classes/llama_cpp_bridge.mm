@@ -374,4 +374,168 @@ void llama_stop_generation() {
     g_should_stop = true;
 }
 
+// ──────────────────────────────────────────────────────
+// Multimodal (Vision) support via mtmd
+// ──────────────────────────────────────────────────────
+
+} // extern "C" (text-only section)
+
+#include "mtmd.h"
+#include "mtmd-helper.h"
+
+// Multimodal global state
+static mtmd_context* g_mtmd_ctx = nullptr;
+static std::mutex g_mtmd_mutex;
+
+extern "C" {
+
+bool llama_init_multimodal(
+    const char* mmproj_path
+) {
+    std::lock_guard<std::mutex> lock(g_mtmd_mutex);
+
+    if (!g_model) {
+        NSLog(@"[llama_cpp_bridge] Cannot init multimodal: text model not loaded");
+        return false;
+    }
+
+    if (g_mtmd_ctx) {
+        mtmd_free(g_mtmd_ctx);
+        g_mtmd_ctx = nullptr;
+    }
+
+    NSLog(@"[llama_cpp_bridge] Initializing multimodal with mmproj: %s", mmproj_path);
+
+    auto params = mtmd_context_params_default();
+    params.use_gpu = true;
+    params.n_threads = 4;
+    params.warmup = true;
+
+    g_mtmd_ctx = mtmd_init_from_file(mmproj_path, g_model, params);
+    if (!g_mtmd_ctx) {
+        NSLog(@"[llama_cpp_bridge] Failed to init multimodal context");
+        return false;
+    }
+
+    bool has_vision = mtmd_support_vision(g_mtmd_ctx);
+    bool has_audio = mtmd_support_audio(g_mtmd_ctx);
+    NSLog(@"[llama_cpp_bridge] Multimodal initialized: vision=%d, audio=%d", has_vision, has_audio);
+
+    return true;
+}
+
+bool llama_generate_with_image(
+    const char* prompt,
+    const unsigned char* image_data,
+    int32_t image_len,
+    float temperature,
+    int32_t max_tokens,
+    char* output,
+    int32_t output_size,
+    int32_t* tokens_generated
+) {
+    std::lock_guard<std::mutex> lock(g_mtmd_mutex);
+
+    if (!g_model || !g_context || !g_mtmd_ctx || !g_vocab) {
+        NSLog(@"[llama_cpp_bridge] Multimodal not ready");
+        return false;
+    }
+
+    NSLog(@"[llama_cpp_bridge] Generating with image: prompt=%.50s..., image=%d bytes", prompt, image_len);
+
+    // 1. Create bitmap from image buffer
+    mtmd_bitmap* bmp = mtmd_helper_bitmap_init_from_buf(g_mtmd_ctx, image_data, (size_t)image_len);
+    if (!bmp) {
+        NSLog(@"[llama_cpp_bridge] Failed to create bitmap from image data");
+        return false;
+    }
+
+    // 2. Tokenize prompt + image
+    mtmd_input_chunks* chunks = mtmd_input_chunks_init();
+    mtmd_input_text text_input = { prompt, true, true };
+    const mtmd_bitmap* bitmaps[] = { bmp };
+
+    int32_t ret = mtmd_tokenize(g_mtmd_ctx, chunks, &text_input, bitmaps, 1);
+    mtmd_bitmap_free(bmp);
+
+    if (ret != 0) {
+        NSLog(@"[llama_cpp_bridge] Tokenize failed: %d", ret);
+        mtmd_input_chunks_free(chunks);
+        return false;
+    }
+
+    // 3. Clear KV cache and evaluate all chunks (text + image embeddings)
+    llama_kv_cache_clear(g_context);
+
+    llama_pos n_past = 0;
+    ret = mtmd_helper_eval_chunks(g_mtmd_ctx, g_context, chunks, n_past, 0,
+                                  512, true, &n_past);
+    mtmd_input_chunks_free(chunks);
+
+    if (ret != 0) {
+        NSLog(@"[llama_cpp_bridge] Eval chunks failed: %d", ret);
+        return false;
+    }
+
+    // 4. Update sampler with generation parameters
+    llama_sampler_free(g_sampler);
+    auto sparams = llama_sampler_chain_default_params();
+    g_sampler = llama_sampler_chain_init(sparams);
+    llama_sampler_chain_add(g_sampler, llama_sampler_init_temp(temperature));
+    llama_sampler_chain_add(g_sampler, llama_sampler_init_top_k(1));
+    llama_sampler_chain_add(g_sampler, llama_sampler_init_dist(1234));
+
+    // 5. Generate tokens
+    std::string result;
+    int n_gen = 0;
+    g_should_stop = false;
+
+    for (int i = 0; i < max_tokens; i++) {
+        if (g_should_stop) break;
+
+        llama_token new_token = llama_sampler_sample(g_sampler, g_context, -1);
+
+        if (llama_vocab_is_eog(g_vocab, new_token)) {
+            NSLog(@"[llama_cpp_bridge] Vision: EOS reached");
+            break;
+        }
+
+        char token_str[256] = {0};
+        int n = llama_token_to_piece(g_vocab, new_token, token_str, sizeof(token_str) - 1, 0, true);
+        if (n > 0) {
+            token_str[n] = '\0';
+            result.append(token_str);
+        }
+
+        llama_batch batch = llama_batch_get_one(&new_token, 1);
+        if (llama_decode(g_context, batch) != 0) {
+            NSLog(@"[llama_cpp_bridge] Vision: decode failed at token %d", i);
+            break;
+        }
+        n_gen++;
+    }
+
+    size_t copy_len = std::min(result.length(), (size_t)(output_size - 1));
+    memcpy(output, result.c_str(), copy_len);
+    output[copy_len] = '\0';
+    *tokens_generated = n_gen;
+
+    NSLog(@"[llama_cpp_bridge] Vision: generated %d tokens", n_gen);
+    return true;
+}
+
+void llama_free_multimodal() {
+    std::lock_guard<std::mutex> lock(g_mtmd_mutex);
+    if (g_mtmd_ctx) {
+        mtmd_free(g_mtmd_ctx);
+        g_mtmd_ctx = nullptr;
+        NSLog(@"[llama_cpp_bridge] Multimodal context freed");
+    }
+}
+
+bool llama_multimodal_supports_vision() {
+    std::lock_guard<std::mutex> lock(g_mtmd_mutex);
+    return g_mtmd_ctx && mtmd_support_vision(g_mtmd_ctx);
+}
+
 } // extern "C"
