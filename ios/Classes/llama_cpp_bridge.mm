@@ -465,7 +465,7 @@ bool llama_generate_with_image(
     }
 
     // 3. Clear KV cache and evaluate all chunks (text + image embeddings)
-    llama_kv_cache_clear(g_context);
+    llama_memory_clear(llama_get_memory(g_context), true);
 
     llama_pos n_past = 0;
     ret = mtmd_helper_eval_chunks(g_mtmd_ctx, g_context, chunks, n_past, 0,
